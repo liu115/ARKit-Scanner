@@ -105,7 +105,7 @@ struct MetalDepthView: View {
                         } else {
                             AccumulatedTimeView(isRecord: false)
                         }
-                        
+
                     }.frame(height: 25)
                     ZStack(alignment: .bottom) {
                         if self.displayStatus == "DEPTH" {
@@ -123,7 +123,7 @@ struct MetalDepthView: View {
                                     self.displayStatus = "DEPTH"
                                 }
                             }.opacity(0.7).frame(width: 100).clipShape(Capsule()).padding([.trailing, .bottom], 20)
-                            
+
                             Button(self.recordStatus) {
                                 if arProvider.arReceiver.isRecord == false {
                                     self.recordStatus = "STOP"
@@ -140,7 +140,6 @@ struct MetalDepthView: View {
                                 .opacity(0.7)
                                 .frame(width: 100)
                                 .padding([.bottom], 10)
-                            
                         }
                     }
                 }
@@ -169,7 +168,7 @@ struct FPSView: View {
 struct AccumulatedTimeView: View {
     @State var accumulatedTime = 0
     @State var accumulatedTime_str = "00:00"
-    @State var isRecord = true
+    @State var isRecord: Bool
     init(isRecord: Bool) {
         self.isRecord = isRecord
     }
