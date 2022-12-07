@@ -338,7 +338,8 @@ final class ARReceiver: NSObject, ARSessionDelegate {
         let currentTime = Date()
         let dateFormater = DateFormatter()
         dateFormater.dateFormat = "YYYY-MM-dd_HH-mm-ss"
-        self.directory = sceneName + "_" + dateFormater.string(from: currentTime)
+        // Remove the whitespaces in the sceneName
+        self.directory = sceneName.trimmingCharacters(in: .whitespaces) + "_" + dateFormater.string(from: currentTime)
 
         self.motion.startDeviceMotionUpdates()
         
