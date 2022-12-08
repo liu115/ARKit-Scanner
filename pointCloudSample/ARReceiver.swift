@@ -30,6 +30,56 @@ struct VideoSettings {
     }
 }
 
+class JSONDataWriter {
+    var fileHandle: FileHandle?
+    var firstline: Bool = true
+    init(fileURL: URL) {
+        do {
+            FileManager.default.createFile(atPath: fileURL.path, contents: nil, attributes: nil)
+            try self.fileHandle = FileHandle(forWritingTo: fileURL)
+        } catch let error as NSError {
+            print("File \(fileURL) open error \(error)")
+        }
+    }
+    func writeFrameDict(key: String, value: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: value, options: []) {
+            let str = String(data: data, encoding: .utf8)
+            if self.firstline {
+                writeString(str: "\"\(key)\": \(str!)")
+                self.firstline = false
+            }
+            else {
+                writeString(str: ",\n\"\(key)\": \(str!)")
+            }
+        } else {
+            return
+        }
+    }
+    func writeFrameString(key: String, value: String) {
+        if self.firstline {
+            writeString(str: "\"\(key)\": \"\(value)\"")
+            self.firstline = false
+        }
+        else {
+            writeString(str: ",\n\"\(key)\": \"\(value)\"")
+        }
+    }
+
+    func writeString(str: String) {
+        if let fileHandle = self.fileHandle, let data = str.data(using: String.Encoding.utf8) {
+            fileHandle.write(data)
+        }
+    }
+
+    func start() {
+        self.writeString(str: "{\n")
+    }
+
+    func end() {
+        self.writeString(str: "\n}")
+    }
+}
+
 class BinaryFrameDataWriter {
     var fileHandle: FileHandle?
     var srcBuffer: UnsafeMutablePointer<UInt8>
@@ -48,34 +98,33 @@ class BinaryFrameDataWriter {
             FileManager.default.createFile(atPath: depthURL.path, contents: nil, attributes: nil)
             try self.fileHandle = FileHandle(forWritingTo: depthURL)
         } catch let error as NSError {
-            print("FITFile >>> File open failed: \(error)")
+            print("ERROR >>> File \(depthURL) open failed: \(error)")
         }
     }
     
     func writerFrame(frameData: Data, compress: Bool) {
         if let fileHandle = self.fileHandle {
             if compress {
-                do {
-                    frameData.copyBytes(to: srcBuffer, count: height_ * width_ * 2)
-                    let compressedSize = compression_encode_buffer(dstBuffer, height_ * width_ * 2,
-                                                                   srcBuffer, height_ * width_ * 2,
-                                                                   nil,
-                                                                   algorithm)
-
-                    print("Before \(frameData.count) bytes. After zlib compressed size: \(compressedSize) bytes")
-                    var size = Int32(compressedSize)
-                    fileHandle.write(Data(bytes: &size, count: MemoryLayout.size(ofValue: size)))
-                    var compressedFrameData = Data(bytes: dstBuffer, count: Int(size))
-                    fileHandle.write(compressedFrameData)
-                    
-//                    let compressedFrameData = try (frameData as NSData).compressed(using: .lz4)
-//                    print("Before \(frameData.count) bytes. After zlib compressed size: \(compressedFrameData.count) bytes")
-//                    var size = Int32(compressedFrameData.count);
-//                    fileHandle.write(Data(bytes: &size, count: MemoryLayout.size(ofValue: size)))
-//                    fileHandle.write(compressedFrameData as Data)
-                } catch {
-                    print ("Compression error: \(error)")
+                frameData.copyBytes(to: srcBuffer, count: height_ * width_ * 2)
+                let compressedSize = compression_encode_buffer(dstBuffer, height_ * width_ * 2,
+                                                               srcBuffer, height_ * width_ * 2,
+                                                               nil,
+                                                               algorithm)
+                if compressedSize == 0 {
+                    print ("Compression error")
                 }
+
+                print("Before \(frameData.count) bytes. After zlib compressed size: \(compressedSize) bytes")
+                var size = Int32(compressedSize)
+                fileHandle.write(Data(bytes: &size, count: MemoryLayout.size(ofValue: size)))
+                let compressedFrameData = Data(bytes: dstBuffer, count: Int(size))
+                fileHandle.write(compressedFrameData)
+
+//                let compressedFrameData = try (frameData as NSData).compressed(using: .lz4)
+//                print("Before \(frameData.count) bytes. After zlib compressed size: \(compressedFrameData.count) bytes")
+//                var size = Int32(compressedFrameData.count);
+//                fileHandle.write(Data(bytes: &size, count: MemoryLayout.size(ofValue: size)))
+//                fileHandle.write(compressedFrameData as Data)
             }
             else {
                 fileHandle.write(frameData)
@@ -276,16 +325,19 @@ final class ARReceiver: NSObject, ARSessionDelegate {
     var videoWriter: VideoWriter?
     var depthWriter: BinaryFrameDataWriter?
     var depthConverter = Depth2IntConverter(height: 192, width: 256)
+    var exifWriter: JSONDataWriter?
     
     var motion = CMMotionManager()
     
     var metadata: [String: String] = [:]
     var cameraTransformDic: [String: String] = [:]
     var intrinsicDic: [String: String] = [:]
+    var exifData: [String: String] = [:]
     var exposureOffsetDic: [String: String] = [:]
+    var exposureTimeDic: [String: String] = [:]
     var imuDic: [String: String] = [:]
-    var exifShutterDic: [String: String] = [:]
-    var exifBrightnessDic: [String: String] = [:]
+//    var exifShutterDic: [String: String] = [:]
+//    var exifBrightnessDic: [String: String] = [:]
     
     // For ultra-wide images
     // var ultra_images = [UIImage]()
@@ -356,6 +408,10 @@ final class ARReceiver: NSObject, ARSessionDelegate {
             }
             let depthURL = dir.appendingPathComponent(self.directory + "/depth.bin")
             self.depthWriter = BinaryFrameDataWriter(depthURL: depthURL, height: depthHeight, width: depthWidth)
+
+            let exifURL = dir.appendingPathComponent(self.directory + "/exif.json")
+            self.exifWriter = JSONDataWriter(fileURL: exifURL)
+            self.exifWriter!.start()
         }
         self.settings.videoFilename = directory
         self.settings.size.width = CGFloat(colorWidth)
@@ -370,7 +426,7 @@ final class ARReceiver: NSObject, ARSessionDelegate {
         self.metadata["scene_name"] = sceneName
         self.metadata["scene_type"] = sceneType
         self.metadata["color_width"] = colorWidth.description
-        self.metadata["color_height"] =  colorHeight.description
+        self.metadata["color_height"] = colorHeight.description
         self.metadata["depth_width"] = depthWidth.description
         self.metadata["depth_height"] = depthHeight.description
         
@@ -381,50 +437,25 @@ final class ARReceiver: NSObject, ARSessionDelegate {
         pause()
         self.isRecord = false
         
-        // save metadata when finishing recording
-        self.metadata["exposure_duration"] = arData.exposureDuration.description
-        
-        // save global exif data in metadata
-        self.metadata["exif_OffsetTime"] = arData.exifData["OffsetTime"] as? String
-        self.metadata["exif_ExposureBiasValue"] = "\(String(describing: arData.exifData["ExposureBiasValue"]!))"
-        self.metadata["exif_ExifVersion"] = arData.exifData["ExifVersion"] as? String
-        self.metadata["exif_SceneType"] = "\(String(describing: arData.exifData["SceneType"]!))"
-        self.metadata["exif_SensingMethod"] = "\(String(describing: arData.exifData["SensingMethod"]!))"
-        self.metadata["exif_FocalLength"] = "\(String(describing: arData.exifData["FocalLength"]!))"
-        self.metadata["exif_LensMake"] = arData.exifData["LensMake"] as? String
-        self.metadata["exif_LensModel"] = arData.exifData["LensModel"] as? String
-        self.metadata["exif_ApertureValue"] = "\(String(describing: arData.exifData["ApertureValue"]!))"
-        self.metadata["exif_FNumber"] = "\(String(describing: arData.exifData["FNumber"]!))"
-        self.metadata["exif_FocalLenIn35mmFilm"] = "\(String(describing: arData.exifData["FocalLenIn35mmFilm"]!))"
-        self.metadata["exif_OffsetTimeDigitized"] = arData.exifData["OffsetTimeDigitized"] as? String
-        self.metadata["exif_Flash"] = "\(String(describing: arData.exifData["Flash"]!))"
-        self.metadata["exif_OffsetTimeOriginal"] = arData.exifData["OffsetTimeOriginal"] as? String
-        self.metadata["exif_MeteringMode"] = "\(String(describing: arData.exifData["MeteringMode"]!))"
-        self.metadata["exif_WhiteBalance"] = "\(String(describing: arData.exifData["WhiteBalance"]!))"
-        self.metadata["exif_ColorSpace"] = "\(String(describing: arData.exifData["ColorSpace"]!))"
-
-        self.metadata["exif_ISOSpeedRatings"] = "\(String(describing: (arData.exifData["ISOSpeedRatings"] as! NSArray?)![0]))"
-        self.metadata["exif_LensSpecification"] = "\(String(describing: (arData.exifData["LensSpecification"] as! NSArray?)![0]))" + "," + "\(String(describing: (arData.exifData["LensSpecification"] as! NSArray?)![1]))" + "," + "\(String(describing: (arData.exifData["LensSpecification"] as! NSArray?)![2]))" + "," + "\(String(describing: (arData.exifData["LensSpecification"] as! NSArray?)![3]))"
-        
         if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
             let encoder = JSONEncoder()
-            if let jsonMetaData = try? encoder.encode(self.metadata), let jsonTrans = try? encoder.encode(self.cameraTransformDic), let jsonIntrinsic = try? encoder.encode(self.intrinsicDic), let jsonOffset = try? encoder.encode(self.exposureOffsetDic), let jsonIMU = try? encoder.encode(self.imuDic), let jsonExifShutter = try? encoder.encode(self.exifShutterDic), let jsonExifBrightness = try? encoder.encode(self.exifBrightnessDic) {
+            if let jsonMetaData = try? encoder.encode(self.metadata), let jsonTrans = try? encoder.encode(self.cameraTransformDic), let jsonIntrinsic = try? encoder.encode(self.intrinsicDic), let jsonOffset = try? encoder.encode(self.exposureOffsetDic), let jsonIMU = try? encoder.encode(self.imuDic) {
                 let metadataURL = dir.appendingPathComponent(self.directory + "/metadata.json")
                 let transURL = dir.appendingPathComponent(self.directory + "/trans.json")
                 let intriURL = dir.appendingPathComponent(self.directory + "/intri.json")
                 let offsetURL = dir.appendingPathComponent(self.directory + "/offset.json")
                 let imuURL = dir.appendingPathComponent(self.directory + "/imu.json")
                 print(metadataURL.path)
-                let exifShutterURL = dir.appendingPathComponent(self.directory + "/exif_ShutterSpeedValue.json")
-                let exifBrightnessURL = dir.appendingPathComponent(self.directory + "/exif_BrightnessValue.json")
+//                let exifShutterURL = dir.appendingPathComponent(self.directory + "/exif_ShutterSpeedValue.json")
+//                let exifBrightnessURL = dir.appendingPathComponent(self.directory + "/exif_BrightnessValue.json")
                 do {
                     try jsonMetaData.write(to: metadataURL)
                     try jsonTrans.write(to: transURL)
                     try jsonIntrinsic.write(to: intriURL)
                     try jsonOffset.write(to: offsetURL)
                     try jsonIMU.write(to: imuURL)
-                    try jsonExifShutter.write(to: exifShutterURL)
-                    try jsonExifBrightness.write(to: exifBrightnessURL)
+//                    try jsonExifShutter.write(to: exifShutterURL)
+//                    try jsonExifBrightness.write(to: exifBrightnessURL)
                 } catch {
                     print("metadata writing errors")
                 }
@@ -436,14 +467,15 @@ final class ARReceiver: NSObject, ARSessionDelegate {
         self.intrinsicDic = [String: String]()
         self.exposureOffsetDic = [String: String]()
         self.imuDic = [String: String]()
-        self.exifShutterDic = [String: String]()
-        self.exifBrightnessDic = [String: String]()
+//        self.exifShutterDic = [String: String]()
+//        self.exifBrightnessDic = [String: String]()
         
         // finish video generating
         self.videoWriter!.videoWriterInput.markAsFinished()
         self.videoWriter!.videoWriter.finishWriting {
             print("finish video generating")
         }
+        self.exifWriter!.end()
         start()
         self.motion.startDeviceMotionUpdates()
     }
@@ -503,7 +535,7 @@ final class ARReceiver: NSObject, ARSessionDelegate {
                 let cameraTransform = (0..<4).flatMap { x in (0..<4).map { y in arData.cameraTransform[x][y] } }
                 self.cameraTransformDic[arData.timeStamp.description] = "[" + cameraTransform[0].description + "," + cameraTransform[1].description + "," + cameraTransform[2].description + "," + cameraTransform[3].description + "," + cameraTransform[4].description + "," + cameraTransform[5].description + "," + cameraTransform[6].description + "," + cameraTransform[7].description + "," + cameraTransform[8].description + "," + cameraTransform[9].description + "," + cameraTransform[10].description + "," + cameraTransform[11].description + "," + cameraTransform[12].description + "," + cameraTransform[13].description + "," + cameraTransform[14].description + "," + cameraTransform[15].description + "]"
                 self.exposureOffsetDic[arData.timeStamp.description] = arData.exposureOffset.description
-                
+
                 let cameraIntrinsics = (0..<3).flatMap { x in (0..<3).map { y in arData.cameraIntrinsics[x][y] } }
                 self.intrinsicDic[arData.timeStamp.description] = "[" + cameraIntrinsics[0].description + "," + cameraIntrinsics[1].description + "," + cameraIntrinsics[2].description + "," + cameraIntrinsics[3].description + "," + cameraIntrinsics[4].description + "," + cameraIntrinsics[5].description + "," + cameraIntrinsics[6].description + "," + cameraIntrinsics[7].description + "," + cameraIntrinsics[8].description + "]"
                 
@@ -516,10 +548,8 @@ final class ARReceiver: NSObject, ARSessionDelegate {
 //                let ultra_settings = AVCapturePhotoSettings()
 //                self.cameraOutput.capturePhoto(with: ultra_settings, delegate: self)
                 
-                // non-global exif data
-                self.exifShutterDic[arData.timeStamp.description] = "\(String(describing: arData.exifData["ShutterSpeedValue"]!))"
-                self.exifBrightnessDic[arData.timeStamp.description] = "\(String(describing: arData.exifData["BrightnessValue"]!))"
-                
+                // Write exif data
+                self.exifWriter?.writeFrameDict(key: arData.timeStamp.description, value: arData.exifData)
                 self.frameNum += 1
             }
         }
